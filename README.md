@@ -1,7 +1,7 @@
 # PyTorch-Simple-MaskRCNN_Jetson_Nano
 Modified open source implementation of Mask RCNN for Edge Devices
 
-•	Backbone: Replace ResNet with MobileNet or EfficientNet for lighter computation
+•	Backbone: Replace ResNet with MobileNet for lighter computation
 
 •	Convolutional Layers: Use depthwise separable convolutions to reduce computation and memory usage
 

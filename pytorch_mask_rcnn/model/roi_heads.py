@@ -111,11 +111,11 @@ class RoIHeads(nn.Module):
         results = dict(boxes=torch.cat(boxes), labels=torch.cat(labels), scores=torch.cat(scores))
         return results
     
-    def forward(self, feature, proposal, image_shape, target):
+    def forward(self, features, proposal, image_shape, target):
         if self.training:
             proposal, matched_idx, label, regression_target = self.select_training_samples(proposal, target)
         
-        box_feature = self.box_roi_pool(feature, proposal, image_shape)
+        box_feature = self.box_roi_pool(features, proposal, image_shape)
         class_logit, box_regression = self.box_predictor(box_feature)
         
         result, losses = {}, {}
@@ -151,7 +151,7 @@ class RoIHeads(nn.Module):
                     result.update(dict(masks=torch.empty((0, 28, 28))))
                     return result, losses
                 
-            mask_feature = self.mask_roi_pool(feature, mask_proposal, image_shape)
+            mask_feature = self.mask_roi_pool(features, mask_proposal, image_shape)
             mask_logit = self.mask_predictor(mask_feature)
             
             if self.training:

@@ -5,20 +5,23 @@ from torch import nn
 from .box_ops import BoxCoder, box_iou, process_box, nms
 from .utils import Matcher, BalancedPositiveNegativeSampler
 
+from .convolutions import DepthwiseSeparableConv
 
 class RPNHead(nn.Module):
     def __init__(self, in_channels, num_anchors):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, in_channels, 3, 1, 1)
-        self.cls_logits = nn.Conv2d(in_channels, num_anchors, 1)
-        self.bbox_pred = nn.Conv2d(in_channels, 4 * num_anchors, 1)
+        self.conv = DepthwiseSeparableConv(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+        self.cls_logits = nn.Conv2d(in_channels, num_anchors, kernel_size=1)  # 1x1 Convolution
+        self.bbox_pred = nn.Conv2d(in_channels, 4 * num_anchors, kernel_size=1)  # 1x1 Convolution
         
-        for l in self.children():
-            nn.init.normal_(l.weight, std=0.01)
-            nn.init.constant_(l.bias, 0)
-            
+        # Initialize weights for the 1x1 convolution layers
+        nn.init.normal_(self.cls_logits.weight, std=0.01)
+        nn.init.constant_(self.cls_logits.bias, 0)
+        nn.init.normal_(self.bbox_pred.weight, std=0.01)
+        nn.init.constant_(self.bbox_pred.bias, 0)
+        
     def forward(self, x):
-        x = F.relu(self.conv(x))
+        x = self.conv(x)
         logits = self.cls_logits(x)
         bbox_reg = self.bbox_pred(x)
         return logits, bbox_reg
@@ -75,9 +78,10 @@ class RegionProposalNetwork(nn.Module):
 
         return objectness_loss, box_loss
         
-    def forward(self, feature, image_shape, target=None):
+    def forward(self, features, image_shape, target=None):
         if target is not None:
             gt_box = target['boxes']
+        feature = list(features.values())[-1]
         anchor = self.anchor_generator(feature, image_shape)
         
         objectness, pred_bbox_delta = self.head(feature)

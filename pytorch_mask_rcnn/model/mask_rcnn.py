@@ -12,6 +12,10 @@ from .pooler import RoIAlign
 from .roi_heads import RoIHeads
 from .transform import Transformer
 
+from torchvision.models import mobilenet_v2
+from torchvision.ops.feature_pyramid_network import FeaturePyramidNetwork, LastLevelMaxPool
+from torchvision.ops import misc
+from .convolutions import DepthwiseSeparableConv
 
 class MaskRCNN(nn.Module):
     """
@@ -115,9 +119,10 @@ class MaskRCNN(nn.Module):
         box_roi_pool = RoIAlign(output_size=(7, 7), sampling_ratio=2)
         
         resolution = box_roi_pool.output_size[0]
-        in_channels = out_channels * resolution ** 2
-        mid_channels = 1024
-        box_predictor = FastRCNNPredictor(in_channels, mid_channels, num_classes)
+        # in_channels = out_channels * resolution ** 2
+        in_channels = out_channels
+        # mid_channels = 1024
+        box_predictor = FastRCNNPredictor(in_channels, num_classes)
         
         self.head = RoIHeads(
              box_roi_pool, box_predictor,
@@ -154,26 +159,43 @@ class MaskRCNN(nn.Module):
             result = self.transformer.postprocess(result, image_shape, ori_image_shape)
             return result
         
-        
-class FastRCNNPredictor(nn.Module):
-    def __init__(self, in_channels, mid_channels, num_classes):
+# Global Average Pooling (GAP) + Single Fully Connected Layer Implementation instead of 2 FCs     
+class FastRCNNPredictor(nn.Module):  # Box Head
+    def __init__(self, in_channels, num_classes):
         super().__init__()
-        self.fc1 = nn.Linear(in_channels, mid_channels)
-        self.fc2 = nn.Linear(mid_channels, mid_channels)
-        self.cls_score = nn.Linear(mid_channels, num_classes)
-        self.bbox_pred = nn.Linear(mid_channels, num_classes * 4)
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))  # Global Average Pooling
+        self.fc = nn.Linear(in_channels, num_classes)
+        self.bbox_pred = nn.Linear(in_channels, num_classes * 4)  # Box Predictor
         
     def forward(self, x):
-        x = x.flatten(start_dim=1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        score = self.cls_score(x)
+        # print(f"Input shape before GAP: {x.shape}")
+        x = self.gap(x)
+        # print(f"Shape after GAP: {x.shape}")
+        x = x.flatten(start_dim=1)  # Apply GAP and then flatten
+        # print(f"Shape after flatten: {x.shape}") 
+        score = self.fc(x)
         bbox_delta = self.bbox_pred(x)
+        return score, bbox_delta
 
-        return score, bbox_delta        
+# Alternate Implementation: 1x1 Convolutions instead of 2 FCs
+
+# class FastRCNNPredictor1x1(nn.Module):
+#     def __init__(self, in_channels, mid_channels, num_classes):
+#         super().__init__()
+#         self.conv1x1_1 = nn.Conv2d(in_channels, mid_channels, kernel_size=1)
+#         self.conv1x1_2 = nn.Conv2d(mid_channels, mid_channels, kernel_size=1)
+#         self.cls_score = nn.Conv2d(mid_channels, num_classes, kernel_size=1)
+#         self.bbox_pred = nn.Conv2d(mid_channels, num_classes * 4, kernel_size=1)
+
+#     def forward(self, x):
+#         x = F.relu(self.conv1x1_1(x))
+#         x = F.relu(self.conv1x1_2(x))
+#         score = self.cls_score(x).view(x.size(0), -1)  # Flatten for final output
+#         bbox_delta = self.bbox_pred(x).view(x.size(0), -1)
+
+#         return score, bbox_delta
     
-    
-class MaskRCNNPredictor(nn.Sequential):
+class MaskRCNNPredictor(nn.Sequential): # Mask Head
     def __init__(self, in_channels, layers, dim_reduced, num_classes):
         """
         Arguments:
@@ -185,87 +207,90 @@ class MaskRCNNPredictor(nn.Sequential):
         
         d = OrderedDict()
         next_feature = in_channels
+        
+        # Replace standard Conv2d with Depthwise Separable Convolutions
         for layer_idx, layer_features in enumerate(layers, 1):
-            d['mask_fcn{}'.format(layer_idx)] = nn.Conv2d(next_feature, layer_features, 3, 1, 1)
-            d['relu{}'.format(layer_idx)] = nn.ReLU(inplace=True)
+            d['mask_fcn{}'.format(layer_idx)] = DepthwiseSeparableConv(next_feature, layer_features, 3, 1, 1)
             next_feature = layer_features
         
-        d['mask_conv5'] = nn.ConvTranspose2d(next_feature, dim_reduced, 2, 2, 0)
-        d['relu5'] = nn.ReLU(inplace=True)
-        d['mask_fcn_logits'] = nn.Conv2d(dim_reduced, num_classes, 1, 1, 0)
+        # Replace Transposed Convolution with Bilinear Interpolation followed by a 1x1 Conv
+        d['bilinear_interp'] = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        d['conv_1x1'] = nn.Conv2d(next_feature, dim_reduced, kernel_size=1)
+        d['bn_interp'] = nn.BatchNorm2d(dim_reduced)
+        d['relu_interp'] = nn.ReLU(inplace=False)
+        
+        # Final 1x1 Convolution for mask prediction
+        d['mask_fcn_logits'] = nn.Conv2d(dim_reduced, num_classes, kernel_size=1)
+        
         super().__init__(d)
 
+        # Initialize weights
         for name, param in self.named_parameters():
-            if 'weight' in name:
+            if 'weight' in name and param.dim() >= 2:  # Ensure the parameter has at least 2 dimensions
                 nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='relu')
-                
-    
-class ResBackbone(nn.Module):
-    def __init__(self, backbone_name, pretrained):
+            elif 'bias' in name:
+                nn.init.constant_(param, 0)
+
+class MobileNetBackboneWithFPN(nn.Module):
+    def __init__(self):
         super().__init__()
-        body = models.resnet.__dict__[backbone_name](
-            pretrained=pretrained, norm_layer=misc.FrozenBatchNorm2d)
-        
-        for name, parameter in body.named_parameters():
-            if 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
-                parameter.requires_grad_(False)
-                
-        self.body = nn.ModuleDict(d for i, d in enumerate(body.named_children()) if i < 8)
-        in_channels = 2048
-        self.out_channels = 256
-        
-        self.inner_block_module = nn.Conv2d(in_channels, self.out_channels, 1)
-        self.layer_block_module = nn.Conv2d(self.out_channels, self.out_channels, 3, 1, 1)
-        
-        for m in self.children():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_uniform_(m.weight, a=1)
-                nn.init.constant_(m.bias, 0)
-        
+        mobilenet = mobilenet_v2(pretrained=False).features
+
+        # Extract layers from MobileNet and replace conv layers with depthwise separable conv
+        self.layer1 = nn.Sequential(
+            DepthwiseSeparableConv(3, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=False)
+        )
+        self.layer2 = nn.Sequential(
+            DepthwiseSeparableConv(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=False)
+        )
+        self.layer3 = nn.Sequential(
+            DepthwiseSeparableConv(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=False)
+        )
+        self.layer4 = nn.Sequential(
+            DepthwiseSeparableConv(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=False)
+        )
+
+        # FPN construction
+        out_channels = 256
+        in_channels_list = [32, 64, 128, 256]
+        self.fpn = FeaturePyramidNetwork(
+            in_channels_list=in_channels_list,
+            out_channels=out_channels,
+            extra_blocks=LastLevelMaxPool()
+        )
+        self.out_channels = out_channels
+
     def forward(self, x):
-        for module in self.body.values():
-            x = module(x)
-        x = self.inner_block_module(x)
-        x = self.layer_block_module(x)
+        # Forward through MobileNet layers
+        c1 = self.layer1(x)
+        c2 = self.layer2(c1)
+        c3 = self.layer3(c2)
+        c4 = self.layer4(c3)
+        
+        # FPN expects the feature maps to be ordered from the highest resolution to the lowest.
+        # Ensuring that c1 (from layer1) has the highest resolution, and c4 (from layer4) has the lowest resolution.
+        # print(f"c1: {c1.shape}, c2: {c2.shape}, c3: {c3.shape}, c4: {c4.shape}") 
+        
+        # Pass through FPN
+        features = [c1, c2, c3, c4]
+        x = self.fpn(OrderedDict([(f'c{i+1}', feat) for i, feat in enumerate(features)]))
         return x
 
     
-def maskrcnn_resnet50(pretrained, num_classes, pretrained_backbone=True):
+# Replace your existing backbone function with this
+def maskrcnn_mobilenet_fpn(num_classes):
     """
-    Constructs a Mask R-CNN model with a ResNet-50 backbone.
+    Constructs a Mask R-CNN model with a MobileNet backbone and FPN.
     
     Arguments:
-        pretrained (bool): If True, returns a model pre-trained on COCO train2017.
         num_classes (int): number of classes (including the background).
     """
     
-    if pretrained:
-        backbone_pretrained = False
-        
-    backbone = ResBackbone('resnet50', pretrained_backbone)
+    backbone = MobileNetBackboneWithFPN()
     model = MaskRCNN(backbone, num_classes)
-    
-    if pretrained:
-        model_urls = {
-            'maskrcnn_resnet50_fpn_coco':
-                'https://download.pytorch.org/models/maskrcnn_resnet50_fpn_coco-bf2d0c1e.pth',
-        }
-        model_state_dict = load_url(model_urls['maskrcnn_resnet50_fpn_coco'])
-        
-        pretrained_msd = list(model_state_dict.values())
-        del_list = [i for i in range(265, 271)] + [i for i in range(273, 279)]
-        for i, del_idx in enumerate(del_list):
-            pretrained_msd.pop(del_idx - i)
 
-        msd = model.state_dict()
-        skip_list = [271, 272, 273, 274, 279, 280, 281, 282, 293, 294]
-        if num_classes == 91:
-            skip_list = [271, 272, 273, 274]
-        for i, name in enumerate(msd):
-            if i in skip_list:
-                continue
-            msd[name].copy_(pretrained_msd[i])
-            
-        model.load_state_dict(msd)
-    
     return model

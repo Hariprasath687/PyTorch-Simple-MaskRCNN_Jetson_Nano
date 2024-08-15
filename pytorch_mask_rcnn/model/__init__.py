@@ -1,1 +1,1 @@
-from .mask_rcnn import maskrcnn_resnet50
+from .mask_rcnn import MaskRCNN, maskrcnn_mobilenet_fpn

@@ -1,13 +1,10 @@
 import math
 import torch
-
 from .utils import roi_align
-
 
 class RoIAlign:
     """
     Performs Region of Interest (RoI) Align operator described in Mask R-CNN
-    
     """
     
     def __init__(self, output_size, sampling_ratio):
@@ -24,32 +21,44 @@ class RoIAlign:
         
         self.output_size = output_size
         self.sampling_ratio = sampling_ratio
-        self.spatial_scale = None
+        self.spatial_scales = None  # Adjusted to handle multiple scales
         
-    def setup_scale(self, feature_shape, image_shape):
-        if self.spatial_scale is not None:
+    def setup_scales(self, features, image_shape):
+        if self.spatial_scales is not None:
             return
         
-        possible_scales = []
-        for s1, s2 in zip(feature_shape, image_shape):
-            scale = 2 ** int(math.log2(s1 / s2))
-            possible_scales.append(scale)
-        assert possible_scales[0] == possible_scales[1]
-        self.spatial_scale = possible_scales[0]
+        self.spatial_scales = []
+        for feature in features.values():
+            feature_shape = feature.shape[-2:]
+            possible_scales = []
+            for s1, s2 in zip(feature_shape, image_shape):
+                scale = 2 ** int(math.log2(s1 / s2))
+                possible_scales.append(scale)
+            assert possible_scales[0] == possible_scales[1]
+            self.spatial_scales.append(possible_scales[0])
         
-    def __call__(self, feature, proposal, image_shape):
+    def __call__(self, features, proposal, image_shape):
         """
         Arguments:
-            feature (Tensor[N, C, H, W])
-            proposal (Tensor[K, 4])
+            features (OrderedDict[Tensor]): feature maps from different levels
+            proposal (Tensor[K, 4]): proposals for the image
             image_shape (Torch.Size([H, W]))
 
         Returns:
             output (Tensor[K, C, self.output_size[0], self.output_size[1]])
-        
         """
         idx = proposal.new_full((proposal.shape[0], 1), 0)
         roi = torch.cat((idx, proposal), dim=1)
         
-        self.setup_scale(feature.shape[-2:], image_shape)
-        return roi_align(feature.to(roi), roi, self.spatial_scale, self.output_size[0], self.output_size[1], self.sampling_ratio)
+        # Setup scales for each feature map
+        self.setup_scales(features, image_shape)
+        
+        pooled_output = []
+        for feature, spatial_scale in zip(features.values(), self.spatial_scales):
+            pooled_output.append(roi_align(feature.to(roi), roi, spatial_scale, 
+                                           self.output_size[0], self.output_size[1], 
+                                           self.sampling_ratio))
+        
+        # Aggregate the pooled outputs, typically by summing or averaging
+        output = torch.sum(torch.stack(pooled_output), dim=0)
+        return output

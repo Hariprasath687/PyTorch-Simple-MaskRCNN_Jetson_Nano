@@ -14,7 +14,6 @@ Modified open source implementation of Mask RCNN for Edge Devices
 •	Softmax & Sigmoid Activations: Kept as is for their respective tasks
 
 •	Box Head: Replace fully connected layers
-
     o	Option 1:  Replace with 1x1 convolutions
     o	Option 2: Use Global Average Pooling (GAP) with a single fully connected layer
     

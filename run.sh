@@ -2,7 +2,7 @@
 
 
 dataset="voc"
-iters=1
+iters=100
 
 if [ $dataset = "voc" ]
 then

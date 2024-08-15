@@ -11,7 +11,7 @@ Modified open source implementation of Mask RCNN for Edge Devices
 
 •	RoIAlign: Maintain current implementation for accuracy
 
-•	Softmax & Sigmoid Activations: Keep as is for their respective tasks
+•	Softmax & Sigmoid Activations: Kept as is for their respective tasks
 
 •	Box Head: 
     o	Option 1: Replace fully connected layers with 1x1 convolutions

@@ -7,7 +7,7 @@ Modified open source implementation of Mask RCNN for Edge Devices
 
 •	Batch Normalization: Retain for faster inference, assuming larger batch sizes
 
-•	ReLU Activation: Keep as is due to its efficiency
+•	ReLU Activation: Kept as is due to its efficiency
 
 •	RoIAlign: Maintain current implementation for accuracy
 

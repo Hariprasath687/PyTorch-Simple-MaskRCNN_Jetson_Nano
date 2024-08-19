@@ -232,31 +232,24 @@ class MaskRCNNPredictor(nn.Sequential): # Mask Head
                 nn.init.constant_(param, 0)
 
 class MobileNetBackboneWithFPN(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrained=True):
         super().__init__()
-        mobilenet = mobilenet_v2(pretrained=False).features
+        mobilenet = mobilenet_v2(pretrained=pretrained).features
 
-        # Extract layers from MobileNet and replace conv layers with depthwise separable conv
-        self.layer1 = nn.Sequential(
-            DepthwiseSeparableConv(3, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=False)
-        )
-        self.layer2 = nn.Sequential(
-            DepthwiseSeparableConv(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=False)
-        )
-        self.layer3 = nn.Sequential(
-            DepthwiseSeparableConv(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=False)
-        )
-        self.layer4 = nn.Sequential(
-            DepthwiseSeparableConv(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=False)
-        )
+        # Define layers from MobileNetV2
+        self.layer1 = nn.Sequential(*mobilenet[:4])  
+        self.layer2 = nn.Sequential(*mobilenet[4:7])
+        self.layer3 = nn.Sequential(*mobilenet[7:14])
+        self.layer4 = nn.Sequential(*mobilenet[14:])
 
         # FPN construction
-        out_channels = 256
-        in_channels_list = [32, 64, 128, 256]
+        out_channels = 256  
+        in_channels_list = [
+            24,  # Output from layer1
+            32,  # Output from layer2
+            96,  # Output from layer3
+            1280, # Output from layer4
+        ]
         self.fpn = FeaturePyramidNetwork(
             in_channels_list=in_channels_list,
             out_channels=out_channels,
@@ -266,18 +259,20 @@ class MobileNetBackboneWithFPN(nn.Module):
 
     def forward(self, x):
         # Forward through MobileNet layers
-        c1 = self.layer1(x)
-        c2 = self.layer2(c1)
-        c3 = self.layer3(c2)
-        c4 = self.layer4(c3)
+        c1 = self.layer1(x)  # Output channels: 24
+        c2 = self.layer2(c1) # Output channels: 32
+        c3 = self.layer3(c2) # Output channels: 96
+        c4 = self.layer4(c3) # Output channels: 1280 
         
         # FPN expects the feature maps to be ordered from the highest resolution to the lowest.
-        # Ensuring that c1 (from layer1) has the highest resolution, and c4 (from layer4) has the lowest resolution.
+        # Ensure: c1 (from layer1) has the highest resolution and lowest number of channels.
+        # c4 (from layer4) has the lowest resolution and highest number of channels.
         # print(f"c1: {c1.shape}, c2: {c2.shape}, c3: {c3.shape}, c4: {c4.shape}") 
         
         # Pass through FPN
         features = [c1, c2, c3, c4]
-        x = self.fpn(OrderedDict([(f'c{i+1}', feat) for i, feat in enumerate(features)]))
+        x = self.fpn(dict(zip(['c1', 'c2', 'c3', 'c4'], features)))
+        # print(f"FPN output channels: {x['c1'].shape[1]}")  
         return x
 
     
@@ -290,7 +285,7 @@ def maskrcnn_mobilenet_fpn(num_classes):
         num_classes (int): number of classes (including the background).
     """
     
-    backbone = MobileNetBackboneWithFPN()
-    model = MaskRCNN(backbone, num_classes)
+    backbone = MobileNetBackboneWithFPN(pretrained=True)  # MobileNet backbone can use pretrained ImageNet weights. Model to start with a strong feature extraction base.
+    model = MaskRCNN(backbone, num_classes)  # Mask R-CNN layers will start with randomly initialized weights
 
     return model
